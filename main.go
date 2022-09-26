@@ -1,9 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"github.com/playwright-community/playwright-go"
+	"gopkg.in/alecthomas/kingpin.v2"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"strings"
@@ -12,9 +16,7 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 
-	"github.com/mxschmitt/playwright-go"
 	"github.com/rustycl0ck/go-openconnect-sso/config"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 func main() {
@@ -47,6 +49,11 @@ func main() {
 
 	logger = log.With(logger, "ts", log.DefaultTimestampUTC, "caller", log.DefaultCaller)
 
+	err := playwright.Install()
+	if err != nil {
+		level.Error(logger).Log("msg", "could not launch playwright", "err", err)
+	}
+
 	pw, err := playwright.Run()
 	if err != nil {
 		level.Error(logger).Log("msg", "could not launch playwright", "err", err)
@@ -57,10 +64,19 @@ func main() {
 	if err != nil {
 		level.Error(logger).Log("msg", "could not launch Firefox", "err", err)
 	}
-	context, err := browser.NewContext()
+	context, err := browser.NewContext(playwright.BrowserNewContextOptions{})
 	if err != nil {
 		level.Error(logger).Log("msg", "could not create context", "err", err)
 	}
+
+	userCacheDir, _ := os.UserCacheDir()
+	bytes, err := ioutil.ReadFile(userCacheDir + "/go-openconnect-sso/cookies.json")
+	if !os.IsNotExist(err) {
+		var readCookies []playwright.BrowserContextAddCookiesOptionsCookies
+		_ = json.Unmarshal(bytes, &readCookies)
+		_ = context.AddCookies(readCookies...)
+	}
+
 	page, err := context.NewPage()
 	if err != nil {
 		level.Error(logger).Log("msg", "could not create page", "err", err)
@@ -71,7 +87,7 @@ func main() {
 	level.Info(logger).Log("msg", "waiting to detect successful authentication token cookie on the browser")
 	page.Goto(initResp.LoginURL)
 
-	var tokenCookie playwright.NetworkCookie
+	var tokenCookie playwright.BrowserContextCookiesResult
 
 	for {
 		foundCookie := false
@@ -89,6 +105,14 @@ func main() {
 			}
 		}
 		if foundCookie {
+			cookiesResults, _ := context.Cookies()
+			bytes, err = json.Marshal(cookiesResults)
+			logError(err, logger)
+			userCacheDir, err := os.UserCacheDir()
+			logError(err, logger)
+			os.MkdirAll(userCacheDir+"/go-openconnect-sso", 0777)
+			err = ioutil.WriteFile(userCacheDir+"/go-openconnect-sso/cookies.json", bytes, 0777)
+			logError(err, logger)
 			browser.Close()
 			break
 		}
@@ -99,6 +123,12 @@ func main() {
 	level.Info(logger).Log("msg", "received openconnect server fingerprint and connection cookie successfully")
 
 	writeOCConfig(logger, finalResp.Cookie, finalResp.Fingerprint, targetVPNServer, *ocFile)
+}
+
+func logError(err error, logger log.Logger) {
+	if err != nil {
+		level.Info(logger).Log("msg", err)
+	}
 }
 
 func initializationStage(logger log.Logger, url string) (config.InitializationResponse, string) {
