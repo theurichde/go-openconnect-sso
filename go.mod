@@ -1,4 +1,4 @@
-module github.com/rustycl0ck/go-openconnect-sso
+module github.com/theurichde/go-openconnect-sso
 
 go 1.18
 

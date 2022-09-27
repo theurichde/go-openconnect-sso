@@ -1,0 +1,21 @@
+# .goreleaser.yml
+project_name: go-openconnect-sso
+builds:
+  - env: [ CGO_ENABLED=0 ]
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    id: "go-openconnect-sso"
+    dir: .
+    main: .
+
+release:
+  draft: true
+
+changelog:
+  skip: false
+  use: git
+  sort: asc
