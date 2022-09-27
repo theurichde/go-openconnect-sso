@@ -16,14 +16,14 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 
-	"github.com/rustycl0ck/go-openconnect-sso/config"
+	"github.com/theurichde/go-openconnect-sso/config"
 )
 
 func main() {
 	var logger log.Logger
 
 	var server = kingpin.Flag("server", "the OpenConnect VPN server address").Short('s').Required().String()
-	var ocFile = kingpin.Flag("config", "the where OpenCOnnect config file will be saved").Short('c').Required().String()
+	var ocFile = kingpin.Flag("config", "where the OpenConnect config file will be saved").Short('c').Required().String()
 	var logFormat = kingpin.Flag("log-format", "log format").Default("logfmt").Enum("json", "logfmt")
 	var logLevel = kingpin.Flag("log-level", "log level [WARNING: 'debug' level will print openconnect login cookie to the console]").Default("info").Enum("info", "warn", "error", "debug", "none")
 	kingpin.Parse()
@@ -226,7 +226,7 @@ func makePostReq(logger log.Logger, xmlPayload, server string) []byte {
 		os.Exit(1)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	level.Info(logger).Log("msg", "successfullly received response from server", "url", resp.Request.URL.String())
+	level.Info(logger).Log("msg", "successfully received response from server", "url", resp.Request.URL.String())
 	level.Debug(logger).Log("msg", "received response", "body", string(body), "url", resp.Request.URL.String())
 
 	return body
