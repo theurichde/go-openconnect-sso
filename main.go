@@ -19,8 +19,9 @@ import (
 	"github.com/theurichde/go-openconnect-sso/config"
 )
 
+var logger log.Logger
+
 func main() {
-	var logger log.Logger
 
 	var server = kingpin.Flag("server", "the OpenConnect VPN server address").Short('s').Required().String()
 	var ocFile = kingpin.Flag("config", "where the OpenConnect config file will be saved").Short('c').Required().String()
@@ -28,53 +29,27 @@ func main() {
 	var logLevel = kingpin.Flag("log-level", "log level [WARNING: 'debug' level will print openconnect login cookie to the console]").Default("info").Enum("info", "warn", "error", "debug", "none")
 	kingpin.Parse()
 
-	if *logFormat == "json" {
-		logger = log.NewJSONLogger(log.NewSyncWriter(os.Stderr))
-	} else {
-		logger = log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
-	}
-
-	switch *logLevel {
-	case "info":
-		logger = level.NewFilter(logger, level.AllowInfo())
-	case "warn":
-		logger = level.NewFilter(logger, level.AllowWarn())
-	case "error":
-		logger = level.NewFilter(logger, level.AllowError())
-	case "debug":
-		logger = level.NewFilter(logger, level.AllowDebug())
-	case "none":
-		logger = level.NewFilter(logger, level.AllowNone())
-	}
-
+	logger = setupLogging(logFormat, logger, logLevel)
 	logger = log.With(logger, "ts", log.DefaultTimestampUTC, "caller", log.DefaultCaller)
 
-	err := playwright.Install()
-	if err != nil {
-		level.Error(logger).Log("msg", "could not launch playwright", "err", err)
+	initResp, targetVPNServer, tokenCookie := start(server, false)
+	finalResp := finalizationStage(targetVPNServer, tokenCookie.Value, initResp.Opaque.Value)
+
+	if finalResp.Cookie == "" || finalResp.Fingerprint == "" {
+		level.Error(logger).Log("msg", "no usable cookie data returned, retrying")
+		initResp, targetVPNServer, tokenCookie := start(server, false)
+		finalResp = finalizationStage(targetVPNServer, tokenCookie.Value, initResp.Opaque.Value)
+	} else {
+		level.Info(logger).Log("msg", "received openconnect server fingerprint and connection cookie successfully")
 	}
 
-	pw, err := playwright.Run()
-	if err != nil {
-		level.Error(logger).Log("msg", "could not launch playwright", "err", err)
-	}
-	browser, err := pw.Firefox.Launch(playwright.BrowserTypeLaunchOptions{
-		Headless: playwright.Bool(false),
-	})
-	if err != nil {
-		level.Error(logger).Log("msg", "could not launch Firefox", "err", err)
-	}
-	context, err := browser.NewContext(playwright.BrowserNewContextOptions{})
-	if err != nil {
-		level.Error(logger).Log("msg", "could not create context", "err", err)
-	}
+	writeOCConfig(finalResp.Cookie, finalResp.Fingerprint, targetVPNServer, *ocFile)
+}
 
-	userCacheDir, _ := os.UserCacheDir()
-	bytes, err := ioutil.ReadFile(userCacheDir + "/go-openconnect-sso/cookies.json")
-	if !os.IsNotExist(err) {
-		var readCookies []playwright.BrowserContextAddCookiesOptionsCookies
-		_ = json.Unmarshal(bytes, &readCookies)
-		_ = context.AddCookies(readCookies...)
+func start(server *string, withInitialCookies bool) (config.InitializationResponse, string, playwright.BrowserContextCookiesResult) {
+	browser, context := setupBrowser()
+	if withInitialCookies {
+		prepareContextWithCookies(context)
 	}
 
 	page, err := context.NewPage()
@@ -82,7 +57,7 @@ func main() {
 		level.Error(logger).Log("msg", "could not create page", "err", err)
 	}
 
-	initResp, targetVPNServer := initializationStage(logger, *server)
+	initResp, targetVPNServer := initializationStage(*server)
 
 	level.Info(logger).Log("msg", "waiting to detect successful authentication token cookie on the browser")
 	page.Goto(initResp.LoginURL)
@@ -105,33 +80,103 @@ func main() {
 			}
 		}
 		if foundCookie {
-			cookiesResults, _ := context.Cookies()
+
+			var cookiesResults = CookiesResult{ExpiresAt: time.Now().Add(time.Hour * 8)}
+			results, err := context.Cookies()
+			cookiesResults.Cookies = results
+			var bytes []byte
 			bytes, err = json.Marshal(cookiesResults)
-			logError(err, logger)
+			logError(err)
+
 			userCacheDir, err := os.UserCacheDir()
-			logError(err, logger)
+			logError(err)
+
 			os.MkdirAll(userCacheDir+"/go-openconnect-sso", 0777)
 			err = ioutil.WriteFile(userCacheDir+"/go-openconnect-sso/cookies.json", bytes, 0777)
-			logError(err, logger)
+			logError(err)
+
 			browser.Close()
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-
-	finalResp := finalizationStage(logger, targetVPNServer, tokenCookie.Value, initResp.Opaque.Value)
-	level.Info(logger).Log("msg", "received openconnect server fingerprint and connection cookie successfully")
-
-	writeOCConfig(logger, finalResp.Cookie, finalResp.Fingerprint, targetVPNServer, *ocFile)
+	return initResp, targetVPNServer, tokenCookie
 }
 
-func logError(err error, logger log.Logger) {
+func prepareContextWithCookies(context playwright.BrowserContext) {
+	userCacheDir, _ := os.UserCacheDir()
+	bytes, err := ioutil.ReadFile(userCacheDir + "/go-openconnect-sso/cookies.json")
+	if !os.IsNotExist(err) {
+		var cookies PersistedCookies
+		_ = json.Unmarshal(bytes, &cookies)
+		if cookies.ExpiresAt.After(time.Now()) {
+			_ = context.AddCookies(cookies.Cookies...)
+		}
+	}
+}
+
+func setupBrowser() (playwright.Browser, playwright.BrowserContext) {
+	err := playwright.Install()
+	if err != nil {
+		level.Error(logger).Log("msg", "could not launch playwright", "err", err)
+	}
+
+	pw, err := playwright.Run()
+	if err != nil {
+		level.Error(logger).Log("msg", "could not launch playwright", "err", err)
+	}
+	browser, err := pw.Firefox.Launch(playwright.BrowserTypeLaunchOptions{
+		Headless: playwright.Bool(false),
+	})
+	if err != nil {
+		level.Error(logger).Log("msg", "could not launch Firefox", "err", err)
+	}
+	context, err := browser.NewContext(playwright.BrowserNewContextOptions{})
+	if err != nil {
+		level.Error(logger).Log("msg", "could not create context", "err", err)
+	}
+	return browser, context
+}
+
+func setupLogging(logFormat *string, logger log.Logger, logLevel *string) log.Logger {
+	if *logFormat == "json" {
+		logger = log.NewJSONLogger(log.NewSyncWriter(os.Stderr))
+	} else {
+		logger = log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
+	}
+
+	switch *logLevel {
+	case "info":
+		logger = level.NewFilter(logger, level.AllowInfo())
+	case "warn":
+		logger = level.NewFilter(logger, level.AllowWarn())
+	case "error":
+		logger = level.NewFilter(logger, level.AllowError())
+	case "debug":
+		logger = level.NewFilter(logger, level.AllowDebug())
+	case "none":
+		logger = level.NewFilter(logger, level.AllowNone())
+	}
+	return logger
+}
+
+type PersistedCookies struct {
+	Cookies   []playwright.BrowserContextAddCookiesOptionsCookies
+	ExpiresAt time.Time
+}
+
+type CookiesResult struct {
+	Cookies   []*playwright.BrowserContextCookiesResult
+	ExpiresAt time.Time
+}
+
+func logError(err error) {
 	if err != nil {
 		level.Info(logger).Log("msg", err)
 	}
 }
 
-func initializationStage(logger log.Logger, url string) (config.InitializationResponse, string) {
+func initializationStage(url string) (config.InitializationResponse, string) {
 	logger = log.With(logger, "stage", "initialization")
 
 	// Get the final redirect-url from the initial server
@@ -157,7 +202,7 @@ func initializationStage(logger log.Logger, url string) (config.InitializationRe
 	level.Debug(logger).Log("targetVPNServer", targetVPNServer)
 
 	var result config.InitializationResponse
-	body := makePostReq(logger, xmlPayload, targetVPNServer)
+	body := makePostReq(xmlPayload, targetVPNServer)
 
 	level.Debug(logger).Log("msg", "received response from server", "body", string(body))
 
@@ -170,7 +215,7 @@ func initializationStage(logger log.Logger, url string) (config.InitializationRe
 	return result, targetVPNServer
 }
 
-func finalizationStage(logger log.Logger, vpnServer string, token string, configHash string) config.FinalizationResponse {
+func finalizationStage(vpnServer string, token string, configHash string) config.FinalizationResponse {
 	logger = log.With(logger, "stage", "finalization")
 
 	xmlPayload := fmt.Sprintf(`
@@ -187,7 +232,7 @@ func finalizationStage(logger log.Logger, vpnServer string, token string, config
   `, configHash, token)
 
 	var result config.FinalizationResponse
-	body := makePostReq(logger, xmlPayload, vpnServer)
+	body := makePostReq(xmlPayload, vpnServer)
 
 	level.Debug(logger).Log("msg", "received response from server", "body", string(body))
 
@@ -200,7 +245,7 @@ func finalizationStage(logger log.Logger, vpnServer string, token string, config
 	return result
 }
 
-func makePostReq(logger log.Logger, xmlPayload, server string) []byte {
+func makePostReq(xmlPayload, server string) []byte {
 
 	req, err := http.NewRequest("POST", server, strings.NewReader(xmlPayload))
 	if err != nil {
@@ -232,7 +277,7 @@ func makePostReq(logger log.Logger, xmlPayload, server string) []byte {
 	return body
 }
 
-func writeOCConfig(logger log.Logger, cookie, fingerprint, server, ocFile string) {
+func writeOCConfig(cookie, fingerprint, server, ocFile string) {
 	content := fmt.Sprintf("cookie=%s\nservercert=%s\n# host=%s\n", cookie, fingerprint, server)
 	if err := os.WriteFile(ocFile, []byte(content), 0600); err != nil {
 		level.Error(logger).Log("msg", "failed to write authentication details to file", "file", ocFile, "err", err)
