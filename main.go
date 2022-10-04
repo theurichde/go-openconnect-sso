@@ -32,13 +32,11 @@ func main() {
 	logger = setupLogging(logFormat, logger, logLevel)
 	logger = log.With(logger, "ts", log.DefaultTimestampUTC, "caller", log.DefaultCaller)
 
-	initResp, targetVPNServer, tokenCookie := start(server, false)
-	finalResp := finalizationStage(targetVPNServer, tokenCookie.Value, initResp.Opaque.Value)
+	finalResp, targetVPNServer := start(server, true)
 
 	if finalResp.Cookie == "" || finalResp.Fingerprint == "" {
 		level.Error(logger).Log("msg", "no usable cookie data returned, retrying")
-		initResp, targetVPNServer, tokenCookie := start(server, false)
-		finalResp = finalizationStage(targetVPNServer, tokenCookie.Value, initResp.Opaque.Value)
+		finalResp, targetVPNServer = start(server, false)
 	} else {
 		level.Info(logger).Log("msg", "received openconnect server fingerprint and connection cookie successfully")
 	}
@@ -46,7 +44,7 @@ func main() {
 	writeOCConfig(finalResp.Cookie, finalResp.Fingerprint, targetVPNServer, *ocFile)
 }
 
-func start(server *string, withInitialCookies bool) (config.InitializationResponse, string, playwright.BrowserContextCookiesResult) {
+func start(server *string, withInitialCookies bool) (config.FinalizationResponse, string) {
 	browser, context := setupBrowser()
 	if withInitialCookies {
 		prepareContextWithCookies(context)
@@ -79,6 +77,7 @@ func start(server *string, withInitialCookies bool) (config.InitializationRespon
 				break
 			}
 		}
+
 		if foundCookie {
 
 			var cookiesResults = CookiesResult{ExpiresAt: time.Now().Add(time.Hour * 8)}
@@ -98,9 +97,9 @@ func start(server *string, withInitialCookies bool) (config.InitializationRespon
 			browser.Close()
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
-	return initResp, targetVPNServer, tokenCookie
+	return finalizationStage(targetVPNServer, tokenCookie.Value, initResp.Opaque.Value), targetVPNServer
 }
 
 func prepareContextWithCookies(context playwright.BrowserContext) {
